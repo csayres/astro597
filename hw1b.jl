@@ -1,101 +1,15 @@
-# using PyCall
-# # required for my mac os to work
-# @pyimport matplotlib
-# matplotlib.use("TkAgg")
-
-# using PyPlot
-
 using Plots
 using DelimitedFiles
 
-# M = E - e * sin E
-# M = 2*pi / period (t - t_o)
-
-# g(E) --> 0 = E - e * sin E - M
-function g(E::Float64, e::Float64, M::Float64)::Float64
-    # E = Eccentric anomaly input in radians
-    # e = eccentricity (0-1)
-    # M = mean anomaly, input in radians
-
-    # returns g as provided in HW
-    return E - e * sin(E) - M
-
-end
-
-# time derivative of g(E) for use in newton solver
-function dg_dt(E::Float64, e::Float64)::Float64
-    # E = Eccentric anomaly input in radians
-    # e = eccentricity (0 - 1)
-
-    # returns dg/dt as provided in HW
-    return 1 - e * cos(E)
-end
-
-
-# a newton solver for Keplers equation
-function newtonSolver(e::Float64, M::Float64)::Float64
-
-    # e = eccentricity (0-1)
-    # M = mean anomaly, input in radians (0-2pi)
-
-    # returns
-    # E = Eccentric anomaly in radians, iterations took, and last error
-
-    # starting point for solver, starting point suggested in lecture
-    E_o = M + 0.85 * e * sign(sin(M))
-    # exit tolerance
-    epsilon = 1e-15
-    maxIter = 1000000
-    iter = 1
-
-    while iter < maxIter
-        global E_next # eventual return value
-        global E_error
-        iter += 1
-        der = dg_dt(E_o, e)
-        if der == 0
-            der = 1e-16 # avoid zero division
-        end
-        E_next = E_o - g(E_o,e,M) / der
-        E_error = abs(E_o-E_next)
-        if E_error < epsilon
-            break # stop iteration we've converged
-        end
-        # update value and continue looping
-        E_o = E_next
-    end
-
-    return E_next
-end
-
-
-#### parse input file for mystery plant
-# columns are time, rv (in m/s) and rv error
-
-function sortByTime(ts, radVel, vErr)
+function foldAndSortByTime(modTime, ts, radVel, vErr)
+    # return a folded time series time, radVel, vErr
+    ts = ts .% modTime # wrap the
     sortInds = sortperm(ts)
     ts = ts[sortInds]
     radVel = radVel[sortInds]
     vErr = vErr[sortInds]
     return ts, radVel, vErr
 end
-
-function foldByTime(ts, modTime)
-    # return timeseries folded at modulo modTime
-    return ts .% modTime
-end
-
-function plotTimeseries(ts, radVel, vErr, figname)
-    # plot the time series
-    plot(ts, radVel, markersize=1, markershape=:auto, line=:solid, linealpha=0.5, yerror=vErr, dpi=150)
-    savefig(figname)
-end
-
-# sort by increasing time and normalize to t=0
-# ts, radVel, vErr = sortByTime(ts, radVel, vErr)
-# ts = ts .- ts[1]
-
-# plotTimeseries(ts, radVel, vErr, "initTS")
 
 function sumMinDist(radVel, vErr)
     v1 = radVel[1:end-1]
@@ -106,31 +20,26 @@ function sumMinDist(radVel, vErr)
     dv = v2 .- v1
     # compute array of successive distances
     # scaled by the errors
-    # metric = sum(sqrt.(dt.^2 .+ dv.^2) ./ sigmas)
-
-    metric = sum(dv.^2 ./ sigmas) # faster
+    metric = sum(dv.^2 ./ sigmas) # minimize this
     return metric
-
 end
 
 function periodSearch(ts, radVel, vErr)
     # a brute force approach
     # returns: bestPeriod, folded time vector, velocity vector, error vector
-    timeStep = .001 # second
+    timeStep = .001 # days
     minTime = 0
-    maxTime = 1000 # by visual inspection
+    maxTime = 1000 # by visual inspection period is obviously less than this
     foldTimes = minTime:timeStep:maxTime
-    metrics = Array{Float64,1}(undef, length(foldTimes))
     minMetric = sumMinDist(radVel, vErr)
-    bestP = -1 # period
+    bestP = -1 # period init
     bestT = ts # times
     bestV = radVel # velocities
     bestE = vErr # errors
     for (i, tryP) in enumerate(foldTimes)
-        tryT = foldByTime(ts, tryP)
-        tryT, tryV, tryE = sortByTime(tryT, radVel, vErr)
+        tryT, tryV, tryE = foldAndSortByTime(tryP, ts, radVel, vErr)
         metric = sumMinDist(tryV, tryE)
-        metrics[i] = metric
+        # metrics[i] = metric
         if metric < minMetric
             minMetric = metric
             bestT = tryT
@@ -139,43 +48,39 @@ function periodSearch(ts, radVel, vErr)
             bestP = tryP
         end
     end
-    print("best period $bestP with metric $minMetric\n")
-    plotTimeseries(bestT, bestV, bestE, "periodFolded")
-    # plot metrics
-    plot(foldTimes, metrics, dpi=150)
-    savefig("metrics")
     return bestP, bestT, bestV, bestE
-end
-
-function vModel(t_i, P, e, t_p, gamma, omega, K)
-    M = 2*pi/P*(t_i-t_p)
-    E = newtonSolver(e, M)
-    # print("E $E\n")
-    f = 2 * atan( ((1+e)/(1-e))^0.5 * tan(E/2) )
-    h = K * cos(omega)
-    c = -K * sin(omega)
-    v_o = gamma + K*e*cos(omega)
-    v_rad = h*cos(f) + c*sin(f) + v_o
-    return v_rad
 end
 
 mp = readdlm("mystery_planet1.txt")
 ts = mp[:,1]
 radVel = mp[:,2]
 vErr = mp[:,3]
+tZero = ts[1]
+ts = ts .- tZero # normalize time to begin at zero
 
 # sort by increasing time
-ts, radVel, vErr = sortByTime(ts, radVel, vErr)
-ts = ts .- ts[1] # normalize time to begin at zero
+# set maximum time to ensure no fold yet
+# not all points are in order from file
+ts, radVel, vErr = foldAndSortByTime(maximum(ts)+100, ts, radVel, vErr)
 period, tsFold, radVelFold, vErrFold = periodSearch(ts, radVel, vErr)
-nVals = length(ts)
 
-Es = zeros(length(ts)) # reusable!
-A = zeros(3,3) # reusable
-b = zeros(3) # reusable
-invSigma2 = vErr .^ -2 # just compute this once
+print("best period $period days\n")
 
-function newton2(e,M)
+# plot the folded timeseries
+plot(tsFold, radVelFold, ylabel="rv (km/s)", xlabel="days folded on period=$period", markersize=1, markershape=:auto, line=:solid, linealpha=0.5, yerror=vErrFold, dpi=150)
+savefig("periodFolded")
+# plotTimeseries(tsFold, radVelFold, vErrFold, "periodFolded")
+
+
+function keplerSolve(e,M)
+    # returns a E for a given e, M
+    # ensure M is wrapped between 0 and 2*pi
+    while M < 0
+        M += 2*pi
+    end
+    while M > 2*pi
+        M -= 2*pi
+    end
     E_o = M + 0.85 * e * sign(sin(M))
     # exit tolerance
     epsilon = 1e-12
@@ -202,18 +107,34 @@ function newton2(e,M)
     return E_o
 end
 
-function solveOrbit(e, period, t_p)
-    # e = x[1]
-    # period = x[2]
-    # t_p = x[3]
-    # period = 111.487
+# make these containers outside the function for reusability
+Es = zeros(length(ts))
+A = zeros(3,3)
+b = zeros(3)
 
-    Ms = 2*pi/period .* ts .- t_p
-    Ms = Ms .% (2*pi)
+# inverse sigma squred is used allover the place so
+# just compute it here
+invSigma2 = vErr .^ -2
+
+function solveOrbit(e, period, t_p)
+    # returns a chi2, h, c, and v_o for the given inputs
+    # Ms = 2*pi/period .* (ts .- t_p)
+    # Ms = Ms .% (2*pi)
+
+    Ms = 2*pi/period .* (ts .- t_p)
+
+    # # wrap Ms to 0-2*pi
+    # for ind in findall(Ms.<0)
+    #     print("updating index $ind\n")
+    #     Ms[ind] = Ms[ind] + 2*pi
+    # end
+
+
     # use keplers eqn solver to get the Es
     for (ii, M) in enumerate(Ms)
+        # ensure M is wrapped correctly between 0-2pi
         ### cut and past in slover here to increase speed?
-        Es[ii] = newton2(e,M)
+        Es[ii] = keplerSolve(e,M)
     end
     fs = 2 * atan.( ((1+e)/(1-e))^0.5 * tan.(Es/2) )
     # linear solver for h, c and v_0
@@ -228,14 +149,11 @@ function solveOrbit(e, period, t_p)
     A[1,2] = sum(invSigma2 .* sincosfs)
     A[1,3] = sum(invSigma2 .* cosfs)
 
-    # A[2,1] = sum(invSigma2 .* sincosfs)
     A[2,1] = A[1,2]
     A[2,2] = sum(invSigma2 .* sin2fs)
     A[2,3] = sum(invSigma2 .* sinfs)
 
-    # A[3,1] = sum(invSigma2 .* cosfs)
     A[3,1] = A[1,3]
-    # A[3,2] = sum(invSigma2 .* sinfs)
     A[3,2] = A[2,3]
     A[3,3] = sum(invSigma2)
 
@@ -251,124 +169,64 @@ function solveOrbit(e, period, t_p)
     return chi2, h, c, v_o
 end
 
-function minSolveOrbit(x)
-    e = x[1]
-    period = x[2]
-    t_p = x[3]
-    chi2, h, c, v_o = solveOrbit(e, period, t_p)
-    return chi2
+# brute force solve for e, and tp
+eRange = 0.7:.01:0.99
+tpRange = 0:0.1:period
+bestChi2 = 1e16 # initialize to a big number
+best_e = 0
+best_tp = 0
+best_h = 0
+best_c = 0
+best_vo = 0
+for e in eRange
+    for t_p in tpRange
+        global bestChi2
+        chi2, h, c, v_o = solveOrbit(e, period, t_p)
+        if chi2 < bestChi2
+            global best_e
+            global best_tp
+            global best_h
+            global best_c
+            global best_vo
+            bestChi2 = chi2
+            best_e = e
+            best_tp = t_p
+            best_h = h
+            best_c = c
+            best_vo = v_o
+        end
+    end
 end
 
-function minSolveFixP(x)
-    e = x[1]
-    t_p = x[2]
-    chi2, h, c, v_o = solveOrbit(e, period, t_p)
-    return chi2
-end
-
-# K = (maximum(radVel)-minimum(radVel)) / 2
-# print("K $K\n")
-x = zeros(3)
-x[1] = 0.5 # e
-x[2] = period
-x[3] = period / 2 # t_p
-print("x $x\n")
-
-# bestChi2 = 1e16
-
-using Optim
-output = optimize(minSolveOrbit, x)
-print("solver output $output\n")
-eSolve, pSolve, t_pSolve = Optim.minimizer(output)
-print("solved e $eSolve, solved P $pSolve\n")
-
-# x2 = zeros(2)
-# x[1] = 0.5
-# x[2] = period / 3
-# output = optimize(minSolveFixP, x2)
-# print("solver output $output\n")
-# eSolve, pSolve, t_pSolve = Optim.minimizer(output)
-# print("solved e $eSolve, solved P $pSolve\n")
-
-chi2, h, c, v_o = solveOrbit(eSolve, pSolve, t_pSolve)
-print("chi2 $chi2\n")
-print("h $h c $c v_o $v_o\n")
-
-# h = K cos(omega)
-# c = -K sin(omega)
-# v_o = gamma + K * e cos(omega)
+print("brute force e=$best_e and t_p=$best_tp\n")
 
 # convert h, c, v_o to gamma, K, omega
-gamma = v_o - eSolve * h # m/s
-K = sqrt(h^2+c^2) # m/s
-omega = acos(h / K) * 360 / (2*pi) # degrees
-print("period $pSolve e $eSolve, t_p $t_pSolve gamma $gamma K $K omega $omega\n")
+gamma = best_vo - best_e * best_h # m/s
+K = sqrt(best_h^2+best_c^2) # m/s
+omega = acos(best_h / K) * 360 / (2*pi) # degrees
+print("period = $period days\ne = $best_e\nt_p = $best_tp days after tZero = $tZero (first point in timeseries)\ngamma = $gamma km/s\nK = $K km/s\nomega = $omega degrees\n")
 
 
+# plot answers
+function plotOrbitSoln(e, P, t_p, h, c, v_o)
+    tMax = maximum(tsFold)
+    tMin = minimum(tsFold)
+    tPts = tMin:0.01:tMax
+    Ms = 2*pi/P .* (tPts .- t_p)
 
+    # Ms = Ms .% (2*pi)
+    Es = zeros(length(tPts))
+    # use keplers eqn solver to get the Es
+    for (ii, M) in enumerate(Ms)
+        Es[ii] = keplerSolve(e,M)
+    end
+    fs = 2 * atan.( ((1+e)/(1-e))^0.5 * tan.(Es/2) )
+    vModel = h .* cos.(fs) .+ c .* sin.(fs) .+ v_o
+    plot(tsFold, radVelFold, ylabel="rv (km/s)", xlabel="days folded on period=$P", markersize=2, seriestype=:scatter, yerror=vErrFold, label="Folded Data", dpi=150)
+    plot!(tPts, vModel, line=:solid, label="Model")
+    savefig("model")
+end
 
-# bestChi = 1e16
-# bestOut = zeros(4)
-# bestIn = zeros(2)
-# for e in 0:.01:0.99
-#     print("e: $e\n")
-#     for t_p in 0:.001:period
-#         global bestChi
-#         out = solveOrbit(e, period, t_p)
-#         if out[1] < bestChi
-#             global bestIn
-#             global bestOut
-#             global bestChi
-#             bestChi = chi2
-#             bestOut = out
-#             print("e $e\n")
-#             bestIn[1] = e
-#             bestIn[2] = t_p
-#         end
-#     end
-# end
-
-
-# print("bestIn $bestIn bestOut $bestOut\n")
-
-
-
-
-
-# function minChi(x)
-#     # x contains array of values to find
-#     # x = e, t_p, gamma, K
-#     e = x[1]
-#     t_p = x[2]
-#     gamma = x[3]
-#     omega = x[4]
-#     K = x[5]
-#     chi2 = 0
-#     for i in 1:nVals
-#         v_i = radVel[i]
-#         t_i = ts[i]
-#         e_i = vErr[i]
-#         chi2 += (v_i - vModel(t_i, P, e, t_p, gamma, omega, K))^2 / e_i^2
-#     end
-#     return chi2
-# end
-
-# x0 = [0, ts[5], 0, 0, initK]
-# using Optim
-# optimize(minChi, x0)
-# print("x0 $x0\n")
-
-
-# def
-# M_planet =
-
-
-
-
-
-
-
-# HD 80606 b
-
+plotOrbitSoln(best_e, period, best_tp, best_h, best_c, best_vo)
 
 
