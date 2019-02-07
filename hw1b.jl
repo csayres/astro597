@@ -53,10 +53,14 @@ end
 
 mp = readdlm("mystery_planet1.txt")
 ts = mp[:,1]
-radVel = mp[:,2]
-vErr = mp[:,3]
+flux = mp[:,2]
+fluxError = mp[:,3]
 tZero = ts[1]
 ts = ts .- tZero # normalize time to begin at zero
+
+maxErr = maximum(fluxErr)
+minErr = minimum(fluxErr)
+print("errs $maxErr $minErr\n")
 
 # sort by increasing time
 # set maximum time to ensure no fold yet
