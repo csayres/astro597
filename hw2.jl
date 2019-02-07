@@ -4,93 +4,59 @@ using Statistics
 using FFTW
 using Optim
 
-
-#################################################################################
-####################################################################################
-#TRANSIT Model stuff
-
 struct Circle
     r::Float64
     x::Float64
     y::Float64
 end
 
-# https://stackoverflow.com/questions/4247889/area-of-intersection-between-two-circles
-# this ones more stable
-function circOverlap(A, B)
-    r = A.r
-    R = B.r
-    # d = hypot(B.x - A.x, B.y - A.y)
-    d = sqrt((B.x-A.x)^2 + (B.y - A.y)^2) # this is faster?
 
-    if d >= r + R
-        return 0
-    end
-    # check next case in which one circle is completely inside
-    # the other
-    if d <= abs(r-R)
-        area1 = pi * r^2
-        area2 = pi * R^2
-        return minimum([area1,area2])
-    end
+function batman(star, planet)
+    # inputs: star, planet Circle structures
+    # returns fraction of flux blocked from planet
+    # basically copied from the batman paper on astro-ph
 
-    if R < r
-        # swap
-        r = B.r
-        R = A.r
-    end
-    part1 = r*r*acos((d*d + r*r - R*R)/(2*d*r))
-    part2 = R*R*acos((d*d + R*R - r*r)/(2*d*R))
-    part3 = 0.5*sqrt((-d+r+R)*(d+r-R)*(d-r+R)*(d+r+R))
-
-    area = part1 + part2 - part3;
-    return area
-end
-
-function agolFlux(star, planet)
-    # star and planet are a Circle struct
-    # directly copied from analytic lightcurve paper 2008
-    # put things in terms of their paper
-    # returns relative flux F
-    r_p = planet.r
     d = sqrt((star.x-planet.x)^2 + (star.y - planet.y)^2)
-    z = d / star.r
-    p = r_p / star.r
-    if (1+p) < z
-        lambdaE = 0
-    elseif abs(1-p) < z & z<= 1+p
-        k_1 = acos((1-p*p+z*z)/(2*z))
-        K_o = acos((p*p + z*z - 1)/(2*p*z))
-        lambdaE = 1/pi*(p*p*k_o+k_1-sqrt((4*z*z-(1+z*z-p*p)^2)/4))
-    elseif z<=1-p
-        lambdaE = p*p
-    elseif z<=p-1
-        lambaE = 1
-    else
-        error("unhandled case in agolFlux!!!")
-    return 1 - lambdaE
+    x = star.r
+    rp = planet.r
+    global A
+    if (rp - d < x) & (rp + d > x)
+        u = (d*d + x*x - rp*rp)/(2*d*x)
+        u = min(u, 1) # because computers aren't perfect
+        v = (d*d + rp*rp - x*x)/(2*d*rp)
+        v = min(v, 1) # because computers aren't perfect
+        w = (-d + x + rp)*(d + x - rp)*(d - x + rp)*(d + x + rp)
+        w = max(w, 0) # because computers aren't perfect
+        A = x*x *acos(u) + rp*rp*acos(v) - 0.5*sqrt(w)
+    elseif x<= rp - d
+        A = pi*x*x
+    elseif x>= rp + d
+        A = pi*rp*rp
+    end
+    return A
 end
 
 
-starRad = 1
-starArea = pi * starRad^2
-planetRad = starRad / 10
+starRad = 1;
+planetRad = starRad / 10;
 
-star = Circle(starRad, 0, 0)
-starY = [0, 0.5, 1]
-starX = -2:.001:2
+star = Circle(starRad, 0, 0);
+starY = [0, 0.5, 1];
+starX = -2:.001:2;
+
 for sy in starY
-    overlapA = zeros(length(starX))
+    flux = zeros(length(starX))
     for (ii, x) in enumerate(starX)
         planet = Circle(planetRad, x, sy)
-        overlapA[ii] = circOverlap(star, planet)
+        flux[ii] = 1 - batman(star, planet)
     end
-
-    light = (starArea .- overlapA) ./ starArea
-
-    plot(starX, light, ylabel="flux", xlabel="star X", alpha=0.5, markersize=1, dpi=150)
-    savefig("modeltrans$sy")
+    if sy == 0
+        plot(starX, flux, plot_title="r_p = 0.1*r_star, no limb darkening", ylabel="relative flux", xlabel="time", label="b = $sy", alpha=0.5, markersize=1, dpi=250)
+    else
+        plot!(starX, flux, label="b = $sy", alpha=0.5, markersize=1)
+    end
 end
+savefig("modeltrans")
 
 function linLimb(rStar,  coeffs)
     # x is radial distance from center of star
@@ -98,7 +64,6 @@ function linLimb(rStar,  coeffs)
     # c1, c2 < 1
     mu = sqrt.(1 .- rStar.^2)
     I = (1 .- coeffs[1].*(1 .- mu))
-    I = I ./ sum(I) # normalize to integrate to 1
     return I
 end
 
@@ -108,7 +73,6 @@ function quadLimb(rStar,  coeffs)
     # c1, c2 < 1
     mu = sqrt.(1 .- rStar.^2)
     I = (1 .- coeffs[1].*(1 .- mu) .- coeffs[2].*(1 .- mu).^2)
-    I = I ./ sum(I) # normalize to integrate to 1
     return I
 end
 
@@ -118,7 +82,6 @@ function sqrtLimb(rStar,  coeffs)
     # c1, c2 < 1
     mu = sqrt.(1 .- rStar.^2)
     I = (1 .- coeffs[1].*(1 .- mu) .- coeffs[2].*(1 .- mu.^2))
-    I = I ./ sum(I) # normalize to integrate to 1
     return I
 end
 
@@ -128,52 +91,53 @@ function expLimb(rStar,  coeffs)
     # c1, c2 < 1
     mu = sqrt.(1 .- rStar.^2)
     I = (1 .- coeffs[1].*(1 .- mu) .- coeffs[2]./(1 .- exp.(mu)))
-    I = I ./ sum(I) # normalize to integrate to 1
     return I
 end
 
-limbList = [linLimb, quadLimb, sqrtLimb, expLimb]
+limbList = [linLimb, quadLimb, sqrtLimb, expLimb];
 
 
-nDisks = 1000
-limbRs = LinRange(0, starRad, nDisks) #.000001 to avoid zero division error
-limbRs = limbRs[2:end] # first point is r=0, so don't use it
-limbIs = quadLimb(limbRs, [0.5, 0.5])
-
-# normalize Is to integrate to 1
-# limbIs = limbIs ./ sum(limbIs)
+nDisks = 1000;
+limbRs = LinRange(0, starRad, nDisks);
+limbRs = limbRs[2:end];
+midPointRs = (limbRs[2:end] .+ limbRs[1:end-1]) ./ 2;
+limbIs = quadLimb(midPointRs, [0.5, 0.5]);
 
 # plot the limb dark model
-plot(limbRs, limbIs, ylabel="I", xlabel="star radius", dpi=150)
+plot(midPointRs, limbIs, label="quadratic profile c1=0.5, c2=0.5", ylabel="I(r)", xlabel="star radius", dpi=250)
 savefig("quadlimb")
 
 
 for sy in starY
-    lightArr = zeros(length(starX))
+    flux = zeros(length(starX))
     for (ii, x) in enumerate(starX)
         planet = Circle(planetRad, x, sy)
-        light = 0
-        for (starRad, limbI) in zip(limbRs, limbIs)
+        shellFluxes = zeros(length(limbRs))
+        for (i,starRad) in enumerate(limbRs)
             star = Circle(starRad, 0, 0)
-            overlap = circOverlap(star, planet)
-            area = pi * starRad * starRad
-            l = (area - overlap) / area * limbI
-            light += l
-
+            flux_i = batman(star, planet)
+            shellFluxes[i] = flux_i
         end
-        lightArr[ii] = light
+        dShell = shellFluxes[2:end] - shellFluxes[1:end-1]
+        flux[ii] = 1 - sum(limbIs .* dShell)
     end
 
-    plot(starX, lightArr, ylabel="flux", xlabel="star X", alpha=0.5, markersize=1, dpi=150)
-    savefig("limbmodeltrans$sy")
+    if sy == 0
+        plot(starX, flux, plot_title="r_p = 0.1*r_star, quadratic limb darkening c1=0.5 c2=0.5", ylabel="relative flux", xlabel="time", label="b = $sy", alpha=0.5, markersize=1, dpi=250)
+    else
+        plot!(starX, flux, label="b = $sy", alpha=0.5, markersize=1)
+    end
+
+    # plot(starX, lightArr, ylabel="flux", xlabel="star X", alpha=0.5, markersize=1, dpi=250)
 end
+savefig("limbmodeltrans")
 
 
 ##########################################################################################
 ##########################
 
 
-function foldAndSortByTime(modTime, ts, flux)#, fluxErr)
+function foldAndSortByTime(modTime, ts, flux)
     # return a folded time series time, flux, fluxErr
     ts = ts .% modTime # wrap the
     sortInds = sortperm(ts)
@@ -214,24 +178,6 @@ function periodSearch(ts, flux, minTime, maxTime)#, fluxErr)
     return bestP, bestT, bestF
 end
 
-function binData(ts, flux, nBins)
-    nPts = length(flux)
-    # print("nPts $nPts\n")
-    stepSize = Int(floor(nPts / nBins))
-    edge1 = 1
-    edge2 = stepSize
-    binnedF = zeros(nBins)
-    binnedT = zeros(nBins)
-    for i in 1:nBins
-        # print("edges $edge1 $edge2\n")
-        binnedF[i] = mean(flux[edge1:edge2])
-        binnedT[i] = mean(ts[edge1:edge2])
-        edge1 += stepSize
-        edge2 += stepSize
-        # print("$i\n")
-    end
-    return binnedT, binnedF
-end
 
 function movingAverage(ts, flux, width)
     newFlux = zeros(length(flux)-width)
@@ -252,47 +198,27 @@ ts = mp[:,1]
 flux = mp[:,2]
 fluxErr = mp[:,3]
 
-# ts, flux = movingAverage(ts, flux, 50)
-# ts, flux = movingAverage(ts, flux, 50)
-# ts, flux = smoothData(ts, flux, 500)
-
-plot(ts, flux, ylabel="flux", xlabel="time", seriestype=:scatter, alpha=0.5, markersize=1, dpi=150)
+plot(ts, flux, label="raw time series", ylabel="relative flux", xlabel="time", seriestype=:scatter, alpha=0.5, markersize=1, dpi=250)
 savefig("raw")
 
-tsSmooth, fluxSmooth = movingAverage(ts, flux, 100)
-plot(tsSmooth, fluxSmooth, ylabel="flux", xlabel="time", seriestype=:scatter, alpha=0.5, markersize=1, dpi=150)
+tsSmooth, fluxSmooth = movingAverage(ts, flux, 20)
+plot(tsSmooth, fluxSmooth, label="smoothed time series", ylabel="relative flux", xlabel="time", seriestype=:scatter, alpha=0.5, markersize=1, dpi=250)
 savefig("rawSmoothed")
 
-# tsBin, fluxBin = binData(ts, flux, 1000)
-# plot(tsBin, fluxBin, ylabel="flux", xlabel="time", seriestype=:scatter, alpha=0.5, markersize=1, dpi=150)
-# savefig("rawBinned")
-
-
-period, tsFold, fluxFold = periodSearch(ts, flux, 9.5, 10.5)#, fluxErr)
-
-# period = period * 2.0
+period, tsFold, fluxFold = periodSearch(ts, flux, 9.5, 10.5)
 
 print("best period $period days\n")
 
-#9.799999999999999
-
-# period = 9.811
 tsFold, fluxFold = foldAndSortByTime(period, ts, flux)#, fluxErr)
 
 # plot the folded timeseries
-plot(tsFold, fluxFold, ylabel="flux (%?)", xlabel="time folded on period=$period", seriestype=:scatter, alpha=0.5, markersize=1, dpi=150)
+plot(tsFold, fluxFold, ylabel="relative flux", xlabel="time folded on period=$period", seriestype=:scatter, alpha=0.5, markersize=1, dpi=250)
 savefig("periodFolded")
 
 tsSmooth, fluxSmooth = movingAverage(tsFold, fluxFold, 25)
 
-plot(tsSmooth, fluxSmooth, minorgrid=true, xminorticks=0:.25:10, xticks=0:1:10, ylabel="flux", xlabel="time folded on period=$period", seriestype=:scatter, alpha=0.5, markersize=1, dpi=150)
+plot(tsSmooth, fluxSmooth, minorgrid=true, xminorticks=0:.25:10, xticks=0:1:10, ylabel="smoothed relative flux", xlabel="time folded on period=$period", seriestype=:scatter, alpha=0.5, markersize=1, dpi=250)
 savefig("periodFoldedSmooth")
-
-# tsBin, fluxBin = smoothData(ts, flux, 500)
-
-# plot(tsBin, fluxBin, ylabel="flux (%?)", xlabel="days folded on period=$period", seriestype=:scatter, alpha=0.5, markersize=1, dpi=150)
-# savefig("periodFoldedBin")
-
 
 
 ################ transit modeling ###################################################
@@ -305,7 +231,7 @@ function transitModel(tVec, P, t_o, T, b, r_p, limbModel, coeffs)
     # b = impact parameter (fraction of star's radius)
     # r_p = planet's radius (as a fraction of star's radius)
     # limbModel = an integer from 0-4 indicating which limb profile to use
-    #              0 = uniform
+    #              0 = uniform (no limb darkening)
     #              1 = linear (coeff2 is ignored)
     #              2 = quadratic
     #              3 = sqrt
@@ -313,22 +239,13 @@ function transitModel(tVec, P, t_o, T, b, r_p, limbModel, coeffs)
     # coeffs = list of coefficients to pass to limb darkening models (ignored for
     #           limbModel = 0, the uniform case)
 
-    # returns vector of modeled flux values normalized to 1
+    # returns vector of modeled flux values relative to 1
 
     # first wrap tVec on period P
     tVec = tVec .% P
 
     starRad = 1 # radius of star is always taken to be 1
-    nCakeLayers = 1000
-    if limbModel > 0
-        limbRs = LinRange(0, starRad, nCakeLayers)
-        limbRs = limbRs[2:end] # ignore r=0, first element
-        limbIs = limbList[limbModel](limbRs, coeffs) # these are normalized to sum to 1
-    else
-        # a uniform star, no limb darkening
-        limbRs = [1]
-        limbIs = [1]
-    end
+
 
     # based on T, duration of transit, determine the scaling between
     # position of the planet and time
@@ -342,20 +259,24 @@ function transitModel(tVec, P, t_o, T, b, r_p, limbModel, coeffs)
     xVec = (tVec .- t_o) .* v
 
     fluxVec = zeros(length(xVec))
-    for (ii, starX) in enumerate(xVec)
-        planet = Circle(r_p, starX, b)
-        limbSum = 0
-        for (rStar, limbI) in zip(limbRs, limbIs)
-            # rStar is increasing cake radii
-            star = Circle(rStar, 0, 0)
-            overlap = circOverlap(star, planet)
-            area = pi * starRad * starRad
-            flux = (area - overlap) / area * limbI
-            limbSum += flux
+    for (ii, planetX) in enumerate(xVec)
+        planet = Circle(r_p, planetX, b)
+        if limbModel == 0
+            # no limb darkening
+            star = Circle(1, 0, 0)
+            fluxVec[ii] = 1 - batman(star, planet)
+        else
+            # yes limb darkening
+            limbIs = limbList[limbModel](midPointRs, coeffs)
+            shellFluxes = zeros(length(limbRs))
+            for (i,starRad) in enumerate(limbRs) # avoid r=0
+                star = Circle(starRad, 0, 0)
+                shellFluxes[i] = batman(star, planet)
+            end
+            dShell = shellFluxes[2:end] - shellFluxes[1:end-1]
+            fluxVec[ii] = 1 - sum(limbIs .* dShell)
         end
-        fluxVec[ii] = limbSum
     end
-
     return fluxVec
 end
 
@@ -384,11 +305,6 @@ b_o = sqrt(1 - r_p*T/tao)
 
 tModel = transitModel(tsSmooth, period, t_o, T, b_o, r_p, 0, nothing)
 
-
-plot(tsSmooth, fluxSmooth, minorgrid=true, xminorticks=0:.25:10, xticks=0:1:10, ylabel="flux", xlabel="time folded on period=$period", seriestype=:scatter, alpha=0.5, markersize=1, dpi=150)
-plot!(tsSmooth, tModel)
-savefig("model-smooth")
-
 # seems somewhat reasonable lets see how well it fits the real data
 
 tModel = transitModel(tsFold, period, t_o, T, b_o, r_p, 0, nothing)
@@ -398,9 +314,9 @@ chi2 = sum((tModel .- flux).^2)
 print("chi2 first guess: $chi2\n")
 
 # plot the folded data on period
-plot(tsFold, fluxFold, minorgrid=true, xminorticks=0:.25:10, xticks=0:1:10, ylabel="flux", xlabel="time folded on period=$period", seriestype=:scatter, alpha=0.5, markersize=1, dpi=150)
+plot(tsFold, fluxFold, minorgrid=true, xminorticks=0:.25:10, xticks=0:1:10, ylabel="flux", xlabel="time folded on period=$period", seriestype=:scatter, alpha=0.5, markersize=1, dpi=250)
 plot!(tsFold, tModel)
-savefig("model")
+savefig("modelGuess")
 
 # define a struct for keeping track of params
 struct Params
@@ -414,7 +330,7 @@ struct Params
     chi2
 end
 
-periodRange = LinRange(period-0.2, period+0.2, 100)
+# periodRange = LinRange(period-0.2, period+0.2, 100)
 
 # t_oRange = LinRange(t_o-0.2, t_o+0.2, 50)
 # TRange = LinRange(0.2, 0.6, 50)
@@ -428,39 +344,30 @@ b_oRange = LinRange(0.8, 1, 25)
 r_pRange = LinRange(0.03, 0.1, 25)
 
 
-bestParams = Params(period,t_o,T,b_o,r_p,0,0,chi2)
+bestParams = Params(period,t_o,T,b_o,r_p,0,0,chi2) # initial guess
 
 print("start params $bestParams\n")
 
-if true # do initial grid search
-    for to in t_oRange
-        print("---------to $to\n")
-        for T in TRange
-            print("    ---------T $T\n")
-            for b in b_oRange
-                for rp in r_pRange
-                    tModel = transitModel(ts, period, to, T, b, rp, 0, nothing)
-                    chi2 = sum((tModel .- flux).^2)
-                    if chi2 < bestParams.chi2
-                        global bestParams
-                        bestParams = Params(period, to, T, b, rp, 0, nothing, chi2)
-                        print("newFit $bestParams\n")
-                    end
+for to in t_oRange
+    print("---------to $to\n")
+    for T in TRange
+        print("    ---------T $T\n")
+        for b in b_oRange
+            for rp in r_pRange
+                tModel = transitModel(ts, period, to, T, b, rp, 0, nothing)
+                chi2 = sum((tModel .- flux).^2)
+                if chi2 < bestParams.chi2
+                    global bestParams
+                    bestParams = Params(period, to, T, b, rp, 0, nothing, chi2)
+                    print("newFit $bestParams\n")
                 end
             end
         end
     end
-else
-    # best fit (from grid search)
-    bestParams = Params(9.80797, 5.75, 0.38, 0.9083333333333333, 0.05625000000000001, 0, nothing, 0.03194680026858922)
-    tModel = transitModel(tsFold, bestParams.period, bestParams.t_o, bestParams.T, bestParams.b, bestParams.r_p, 0, nothing)
-    chi2 = sum((tModel .- flux).^2)
-    bestParams = Params(bestParams.period, bestParams.t_o, bestParams.T, bestParams.b, bestParams.r_p, 0, nothing, chi2)
-    print("bestParams in if block $bestParams\n")
-
 end
 
 # plot the folded data on period
+tModel = transitModel(tsFold, bestParams.period, bestParams.t_o, bestParams.T, bestParams.b, bestParams.r_p, 0, nothing)
 plot(tsFold, fluxFold, minorgrid=true, xminorticks=0:.25:10, xticks=0:1:10, ylabel="flux", xlabel="time folded on period=$period", seriestype=:scatter, alpha=0.5, markersize=1, dpi=250)
 plot!(tsFold, tModel)
 savefig("modelSearchedFolded")
@@ -476,6 +383,8 @@ bestParams1 = deepcopy(bestParams)
 
 # finially lets let the minimizer try to find an even better soln, with limb darkening this time!
 # use a quadratic limb profile
+
+limbModel = 2 # corresponds to quadratic
 
 function minimizeModel(x)
     period = abs(x[1])
@@ -497,7 +406,7 @@ function minimizeModel(x)
     if c2 > 1
         c2 = 1
     end
-    tModel = transitModel(ts, period, t_o, T, b, r_p, 2, [c1, c2])
+    tModel = transitModel(ts, period, t_o, T, b, r_p, limbModel, [c1, c2])
     chi2 = sum((tModel .- flux).^2)
     return chi2
 end
@@ -512,6 +421,34 @@ bestFit = Optim.minimum(out)
 print("best fit $bestFit\n")
 bestFit = Optim.minimizer(out)
 print("best fit $bestFit\n")
+
+best_period = bestFit[1]
+best_t_o = bestFit[2]
+best_T = bestFit[3]
+best_b = bestFit[4]
+best_r_p = bestFit[5]
+c1 = abs(bestFit[6])
+c2 = abs(bestFit[7])
+
+# refold on new period
+tsFold, fluxFold = foldAndSortByTime(best_period, ts, flux)
+
+tModel = transitModel(ts, bestParams.period, bestParams.t_o, bestParams.T, bestParams.b, bestParams.r_p, limbModel, [c1, c2])
+plot(tsFold, fluxFold, minorgrid=true, xminorticks=0:.25:10, xticks=0:1:10, ylabel="flux", xlabel="time folded on period=$period", seriestype=:scatter, alpha=0.5, markersize=1, dpi=250)
+plot!(tsFold, tModel)
+savefig("finalModelFolded")
+
+
+plot(ts, flux, minorgrid=true, ylabel="flux", xlabel="time", seriestype=:scatter, alpha=0.5, markersize=1, dpi=250)
+plot!(ts, tModel)
+savefig("finalModel")
+
+# quadritic profile
+# plot the limb dark model
+limbIs = quadLimb(midPointRs, [c1, c2])
+plot(midPointRs, limbIs, ylabel="I", xlabel="star radius", dpi=250)
+savefig("finalQuadlimb")
+
 
 # fix t_o, that should be well constrained
 # fix r_p that should be well constrained
@@ -552,43 +489,44 @@ print("best fit $bestFit\n")
 
 
 ########### FFT stuff
-function doFFT(ts, flux)
-    subMean = flux .- mean(flux)
-    ft = fft(subMean)
-    pwr = real.(ft .* conj.(ft))
-    nBins = length(pwr)
-    dt = mean(ts[2:end] - ts[1:end-1])
-    dt_sig = std(ts[2:end] - ts[1:end-1])
-    print("dt $dt with std $dt_sig\n")
 
-    freq = float.(1:nBins) ./ (nBins .* dt)
+# function doFFT(ts, flux)
+#     subMean = flux .- mean(flux)
+#     ft = fft(subMean)
+#     pwr = real.(ft .* conj.(ft))
+#     nBins = length(pwr)
+#     dt = mean(ts[2:end] - ts[1:end-1])
+#     dt_sig = std(ts[2:end] - ts[1:end-1])
+#     print("dt $dt with std $dt_sig\n")
 
-    # only keep the first half (to nyquest)
-    # look in a reasonable range of frequencies
-    pwr = pwr[1:Int(floor(nBins / 2))]
-    freq = freq[1:Int(floor(nBins / 2))]
-    freq1 = freq[1]
-    freq2 = freq[end]
-    print("freqs $freq1 $freq2\n")
+#     freq = float.(1:nBins) ./ (nBins .* dt)
 
-    pwr = pwr[1:10]
-    freq = freq[1:10]
+#     # only keep the first half (to nyquest)
+#     # look in a reasonable range of frequencies
+#     pwr = pwr[1:Int(floor(nBins / 2))]
+#     freq = freq[1:Int(floor(nBins / 2))]
+#     freq1 = freq[1]
+#     freq2 = freq[end]
+#     print("freqs $freq1 $freq2\n")
 
-    maxVal, maxInd = findmax(pwr)
-    bestFreq = freq[maxInd]
-    period = 1 / bestFreq
+#     pwr = pwr[1:10]
+#     freq = freq[1:10]
 
-    print("best period $period at freq $bestFreq\n")
+#     maxVal, maxInd = findmax(pwr)
+#     bestFreq = freq[maxInd]
+#     period = 1 / bestFreq
 
-    plot(freq, pwr, ylabel="fft", xlabel="frequency", alpha=0.5, markersize=1, dpi=150)
-    savefig("fft")
-    # tryP = 37.1275
-    # period = 37.1275
+#     print("best period $period at freq $bestFreq\n")
 
-    # period = 9.811 #looks pretty good too
-    # tryT, tryV, tryE = foldAndSortByTime(tryP, ts, flux, fluxErr)
-    return period
-end
+#     plot(freq, pwr, ylabel="fft", xlabel="frequency", alpha=0.5, markersize=1, dpi=250)
+#     savefig("fft")
+#     # tryP = 37.1275
+#     # period = 37.1275
+
+#     # period = 9.811 #looks pretty good too
+#     # tryT, tryV, tryE = foldAndSortByTime(tryP, ts, flux, fluxErr)
+#     return period
+# end
 
 # period = doFFT(tsSmooth, fluxSmooth)
 
@@ -597,7 +535,7 @@ end
 # # not all points are in order from file
 # ts1, flux1 = foldAndSortByTime(period, ts, flux)
 # # plot the folded timeseries
-# plot(ts1, flux1, ylabel="flux (%?)", xlabel="days folded on period=$period", seriestype=:scatter, alpha=0.5, markersize=1, dpi=150)
+# plot(ts1, flux1, ylabel="flux (%?)", xlabel="days folded on period=$period", seriestype=:scatter, alpha=0.5, markersize=1, dpi=250)
 # savefig("periodFoldedFFT")
 
 
