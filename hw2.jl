@@ -222,7 +222,6 @@ savefig("periodFoldedSmooth")
 
 
 ################ transit modeling ###################################################
-# find period, depth, impact parameter, duration, density of the star
 function transitModel(tVec, P, t_o, T, b, r_p, limbModel, coeffs)
     # tVec = vector of times at which to compute transit
     # P = period
@@ -303,7 +302,7 @@ tao = 0.1 # ingress/egress duration
 # finally estimate the impact parameter
 b_o = sqrt(1 - r_p*T/tao)
 
-tModel = transitModel(tsSmooth, period, t_o, T, b_o, r_p, 0, nothing)
+# tModel = transitModel(tsSmooth, period, t_o, T, b_o, r_p, 0, nothing)
 
 # seems somewhat reasonable lets see how well it fits the real data
 
@@ -379,7 +378,7 @@ plot!(ts, tModel)
 savefig("modelSearched")
 
 #### next grid for limb darkening
-bestParams1 = deepcopy(bestParams)
+# bestParams1 = deepcopy(bestParams)
 
 # finially lets let the minimizer try to find an even better soln, with limb darkening this time!
 # use a quadratic limb profile
@@ -417,7 +416,7 @@ print("begin minimizer\n")
 
 out = optimize(minimizeModel, x_o)
 print("minimizer output:\n $out\n")
-bestFit = Optim.minimum(out)
+bestChi2 = Optim.minimum(out)
 print("best fit $bestFit\n")
 bestFit = Optim.minimizer(out)
 print("best fit $bestFit\n")
@@ -429,6 +428,8 @@ best_b = bestFit[4]
 best_r_p = bestFit[5]
 c1 = abs(bestFit[6])
 c2 = abs(bestFit[7])
+
+bestParams = Params(best_period, best_t_o, best_T, best_b, best_r_p, bestChi2)
 
 # refold on new period
 tsFold, fluxFold = foldAndSortByTime(best_period, ts, flux)
