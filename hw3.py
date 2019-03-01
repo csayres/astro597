@@ -1,5 +1,7 @@
 import numpy
 from scipy import optimize
+import time
+import itertools
 import matplotlib.pyplot as plt
 import rebound
 
@@ -133,8 +135,8 @@ for inc in inclinationList:
         )
     sim.move_to_com()
 
-    for i, time in enumerate(times):
-        sim.integrate(time, exact_finish_time=0)
+    for i, t in enumerate(times):
+        sim.integrate(t, exact_finish_time=0)
 
         for j, planet in enumerate(planets):
             planet.model_x[-1][i] = sim.particles[j+1].x
@@ -217,8 +219,8 @@ for inc in [0, 59]:
     radialVy = numpy.zeros(nTimesteps)
     radialVz = numpy.zeros(nTimesteps)
 
-    for i, time in enumerate(times):
-        sim.integrate(time, exact_finish_time=0)
+    for i, t in enumerate(times):
+        sim.integrate(t, exact_finish_time=0)
         radialVx[i] = sim.particles[0].vx
         radialVy[i] = sim.particles[0].vy
         radialVz[i] = sim.particles[0].vz
@@ -236,7 +238,7 @@ for inc in [0, 59]:
     plt.close()
 
 
-##### fit 4 keplarians to vx ################
+########## fit 4 keplarians to vx ################
 
 def kepEq(x, M, e):
     E = x[0]
@@ -254,8 +256,94 @@ def vRad(K, omega, e, Mlist):
         sol = optimize.root(kepEq, EGuess, args=(M, e))
         E = float(sol.x[0])
         Es[ii] = E
+
     f = 2 * numpy.arctan(((1 + e) / (1 - e)**0.5 * numpy.tan(Es / 2)))
     return h * numpy.cos(f) + c * numpy.sin(f) + v_o
+
+# def solveKeplarians(x, modelV):
+#     # run this through a minimizer to try and tweak the orbital paramters such
+#     # that the best match to the rebound simulated rv is obtained by a
+#     # series of 4 keplarians.
+
+#     # reshape x in to rows and columns
+#     # columns are P, MA, omega, e, K (at time 0)
+#     # rows are planet d c b e
+#     x = numpy.asarray(x).reshape(2,5)
+#     vRads = []
+#     for P, MA, omega, e, K in x:
+#         P = abs(P)
+#         e = abs(e)
+#         K = abs(K)
+#         MList = MA + 2 * numpy.pi / P * (times - times[0])
+#         v = -1*vRad(K, omega, e, MList)
+#         vRads.append(v)
+#     vRads += vRadConst # const from planet parameters we aren't varying
+#     vSum = numpy.sum(vRads, axis=0)
+#     chi2 = numpy.sum((vRads-vSum)**2)
+#     return chi2
+
+
+def getF(e, P, M):
+    ### solve keplers eqn with newtons method
+    Ms = M + 2 * numpy.pi / P * (times - times[0])
+    Es = Ms + 0.85 * e * numpy.sign(numpy.sin(Ms))
+    epsilon = 1e-10
+    while True:
+        dEs = 1 - e * numpy.cos(Es)
+        dEs[dEs==0] = 1e-16 # protect against zero division
+        E_next = Es - (Es - e * numpy.sin(Es) - Ms) / dEs
+        E_error = numpy.max(numpy.abs(Es - E_next))
+        if E_error < epsilon:
+            break
+        Es = E_next
+    fs = 2 * numpy.arctan( ((1+e)/(1-e))**0.5 * numpy.tan(Es/2.0) )
+    return fs
+
+def fitKeplers(x, measV):
+    nPlanets = 4
+    x = numpy.asarray(x).reshape(nPlanets,3)
+    fs = []
+    for e, P, M in x:
+        fs.append(getF(e,P,M))
+    fs = numpy.asarray(fs)
+    # linear solver for h, c, and v_o
+    cosfs = numpy.cos(fs)
+    sinfs = numpy.sin(fs)
+
+    stack = numpy.vstack((cosfs, sinfs, numpy.ones(len(fs[0]))))
+
+    # linear solver for h, c, and v_o
+    # build array A
+    A = []
+    for element in stack:
+        A.append(numpy.sum(element*stack, axis=1))
+    A = numpy.asarray(A)
+
+    # multiply every row of stack by measV
+    measV = numpy.array([measV]*len(stack))
+    b = numpy.sum(stack*measV, axis=1)
+
+    coeffs = numpy.linalg.solve(A, b)
+    rv = numpy.zeros(len(fs[0]))
+    for coeff, row in zip(coeffs, stack):
+        rv += coeff*row
+    return -1 * rv
+
+### solve radial velocities for lest massive planets
+# we wont vary these
+# vRadConst = []
+# for planet in [planetD, planetE]:
+#     vRadConst.append(getRadVel(planet.e, planet.P, planet.MA))
+
+
+# def solveKeplarians2(x, vRadMeas):
+#     vRads = []
+#     x = numpy.asarray(x).reshape(2,3)
+#     for e, P, M in x:
+#         vRads.append(getRadVel(e, P, M))
+#     vRads += vRadConst # const from planet parameters we aren't varying
+
+
 
 
 vRads = []
@@ -293,6 +381,50 @@ plt.ylabel("radial velocity residulas (m/s)")
 plt.xlabel("innermost planet orbits")
 plt.savefig("residuals.png", dpi=150)
 plt.close()
+
+
+#### try to tweak orbital params for a better fit
+initialParams = []
+for planet in planets:
+    initialParams += [planet.e, planet.P, planet.MA]
+initialParams = numpy.array(initialParams)
+
+out = fitKeplers(initialParams, radialVz)
+import pdb; pdb.set_trace()
+# create a grid varying each orbital parameter by 10% search for the best
+nParams = len(initialParams)
+paramScalings = numpy.linspace(.9, 1.1, 5)
+grid = numpy.array(list(itertools.product(paramScalings, repeat=nParams)))
+
+t1 = time.time()
+solveKeplarians(initialParams, radialVz)
+print("took %.4f"%(t1-time.time()))
+import pdb; pdb.set_trace()
+
+
+
+
+
+
+
+if False:
+    print("begin optimize")
+    t_o = time.time()
+    res = optimize.minimize(solveKeplarians, initialParams, args=(radialVz,))
+    print("took %.2f"%(time.time()-t_o))
+    import pdb; pdb.set_trace()
+    xFit = numpy.abs(res.x)
+else:
+    xFit = numpy.abs([1.67424193e+05,  6.04444626e+00,  3.32528328e+00,  5.49404667e+00,
+        4.66407932e+00,  2.59961184e+06,  3.15160590e+01,  1.79881532e+00,
+        8.18404328e+02,  6.29768038e+01,  5.28047424e+06,  4.53785648e+01,
+        3.52656960e+01,  6.25433713e+02,  1.46915406e+02,  1.07360640e+07,
+        1.79263727e+01,  9.86261767e+00, -1.86212848e+01,  2.32308045e+00])
+print("chi2 initial: %.2f"%(solveKeplarians(initialParams, radialVz)))
+print("chi2 fit: %.2f"%(solveKeplarians(xFit, radialVz)))
+
+
+
 
 ################## TTV ########################
 secondsPerYear = 3.154e7
@@ -341,20 +473,16 @@ for sm in [mStar/2, mStar, 2*mStar]:
     nTransits = len(transitTimes)
     transitNumber = range(nTransits)
     p = numpy.polyfit(transitNumber, transitTimes, deg=1)
-    fitLine = p[0]*transitNumber + p[1]
+    fitLine = p[0] * transitNumber + p[1]
     plt.plot(transitTimes / secondsPerYear, (transitTimes - fitLine)/3600.0, '-o', alpha=0.7, label="star mass = %.2f x (star mass)"%(sm / mStar))
 plt.xlabel("time (years)")
 plt.ylabel("TTV (hours)")
 plt.legend()
-plt.show()
+plt.savefig("TTV.png")
+plt.close()
 
 
 # # ffmpeg -r 10 -f image2 -i step_%06d.png -pix_fmt yuv420p orbit.mp4
-# plot results
-# print("max xy", maxX, maxY)
-# plt.figure()
-# for planet in planets:
-#     plt.plot(planet.model_x, planet.model_y)
-# plt.show()
+
 
 
