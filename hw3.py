@@ -2,7 +2,6 @@ import numpy
 import multiprocessing
 from scipy import optimize
 import time
-import itertools
 import matplotlib.pyplot as plt
 import rebound
 
