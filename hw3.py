@@ -1,4 +1,5 @@
 import numpy
+import multiprocessing
 from scipy import optimize
 import time
 import itertools
@@ -199,7 +200,7 @@ for inc in [0, 59]:
     sim.dt = planetD.P / 100.0  # shortest period
 
     sim.add(m=mStar)
-    for planet in planets:
+    for planet in [planetC, planetB]:
         sim.add(
             m=planet.mPublished,
             P=planet.P,
@@ -287,8 +288,13 @@ def getF(e, P, M):
     ### solve keplers eqn with newtons method
     Ms = M + 2 * numpy.pi / P * (times - times[0])
     Es = Ms + 0.85 * e * numpy.sign(numpy.sin(Ms))
-    epsilon = 1e-10
+    epsilon = 1e-8
+    _iter = 0
     while True:
+        _iter += 1
+        if _iter > 1000:
+            print("max iter reached!!!")
+            raise RuntimeError("gah!")
         dEs = 1 - e * numpy.cos(Es)
         dEs[dEs==0] = 1e-16 # protect against zero division
         E_next = Es - (Es - e * numpy.sin(Es) - Ms) / dEs
@@ -299,12 +305,11 @@ def getF(e, P, M):
     fs = 2 * numpy.arctan( ((1+e)/(1-e))**0.5 * numpy.tan(Es/2.0) )
     return fs
 
-def fitKeplers(x, measV):
-    nPlanets = 4
+def fitKeplers(x, nPlanets, measV):
     x = numpy.asarray(x).reshape(nPlanets,3)
-    fs = []
+    fs = [] # holds a list of fs for each planet
     for e, P, M in x:
-        fs.append(getF(e,P,M))
+        fs.append(getF(e, P, M))
     fs = numpy.asarray(fs)
     # linear solver for h, c, and v_o
     cosfs = numpy.cos(fs)
@@ -327,7 +332,9 @@ def fitKeplers(x, measV):
     rv = numpy.zeros(len(fs[0]))
     for coeff, row in zip(coeffs, stack):
         rv += coeff*row
-    return -1 * rv
+    # next compute the chi2 and return it
+    chi2 = numpy.sum((rv - measV)**2)
+    return chi2, rv
 
 ### solve radial velocities for lest massive planets
 # we wont vary these
@@ -348,7 +355,7 @@ def fitKeplers(x, measV):
 
 vRads = []
 plt.figure(figsize=(10,10))
-for planet in planets:
+for planet in [planetC, planetB]:
     MList = planet.MA + 2 * numpy.pi / planet.P * (times - times[0])
     v = vRad(planet.K, planet.omega, planet.e, MList)
     v = -1*v # this was necessary
@@ -385,46 +392,126 @@ plt.close()
 
 #### try to tweak orbital params for a better fit
 initialParams = []
-for planet in planets:
+for planet in [planetC, planetB]:
     initialParams += [planet.e, planet.P, planet.MA]
 initialParams = numpy.array(initialParams)
 
-out = fitKeplers(initialParams, radialVz)
-import pdb; pdb.set_trace()
-# create a grid varying each orbital parameter by 10% search for the best
-nParams = len(initialParams)
-paramScalings = numpy.linspace(.9, 1.1, 5)
-grid = numpy.array(list(itertools.product(paramScalings, repeat=nParams)))
 
+nPlanets = 2
 t1 = time.time()
-solveKeplarians(initialParams, radialVz)
-print("took %.4f"%(t1-time.time()))
-import pdb; pdb.set_trace()
+chi2, rv = fitKeplers(initialParams, nPlanets, radialVz)
+
+print("init chi2 %.5f"%chi2)
+
+print("kep fit took %.2f"%(time.time()-t1))
+plt.figure(figsize=(10,10))
+plt.plot(times, radialVz, label="rebound (WH-Fast) vz")
+plt.plot(times, rv, label="simultaneously fit keplerains")
+plt.legend()
+plt.xlabel("time (seconds)")
+plt.ylabel("radial velocity (m/s)")
+plt.savefig("simul.png")
+plt.close()
+
+### look at residuals
+plt.figure(figsize=(10, 10))
+plt.plot(times / planetD.P, radialVz - rv, label="WH-Fast - simul")
+p = plt.axhspan(-10, 10, facecolor='red', alpha=0.2, label="+/- 10 m/s")
+p = plt.axhspan(-5, 5, facecolor='green', alpha=0.2, label="+/- 5 m/s")
+plt.legend()
+plt.ylabel("radial velocity residulas (m/s)")
+plt.xlabel("innermost planet orbits")
+plt.savefig("simulresiduals.png", dpi=150)
+plt.close()
+
+nParams = len(initialParams)
+
+varyMs = numpy.radians(numpy.linspace(0,359.9,45))
+varyEs = numpy.linspace(1/2.0, 2.0, 10)
+gridParams = []
+for p1M in varyMs:
+    for p1e in varyEs:
+        p1 = [planetC.e*p1e, planetC.P, p1M]
+        for p2M in varyMs:
+            for p2e in varyEs:
+                gridParams.append(p1+[planetB.e*p2e, planetB.P, p2M])
+gridParams = numpy.array(gridParams)
 
 
 
+def parallelGridSearch(gridInds):
+    bestChi2 = 1e16
+    bestRV = None
+    bestGridInd = None
+    for ii, gridInd in enumerate(gridInds):
+        # scalings = numpy.array(scalingGrid[gridInd])
+        params = gridParams[gridInd]
+        if ii % 1000 == 0:
+            print("%.0f percent done"%(100*ii/float(len(gridInds))))
+        chi2, rv = fitKeplers(params, nPlanets, radialVz)
+        if chi2 < bestChi2:
+            bestChi2 = chi2
+            bestRV = rv
+            bestGridInd = ii
+    return bestChi2, bestGridInd, bestRV
 
 
+allGridInds = numpy.arange(len(gridParams))
+splitGridInds = numpy.array_split(allGridInds, 12)
+p = multiprocessing.Pool(12)
+t1 = time.time()
+res = p.map(parallelGridSearch, splitGridInds)
+minInd = numpy.argmin([x[0] for x in res])
+bestRV = res[minInd][-1]
+bestVals = gridParams[res[minInd][1]]
+print("grid search found chi2 (%.2f): "%res[minInd][0])
+print("planet c | e=%.2f P=%.4f (days) MA=%.4f (degrees)"%(bestVals[0], bestVals[1]/secondsPerDay, numpy.degrees(bestVals[2])))
+print("planet b | e=%.2f P=%.4f (days) MA=%.4f (degrees)"%(bestVals[0+3], bestVals[1+3]/secondsPerDay, numpy.degrees(bestVals[2+3])))
+
+print("grid search took : %.2f"%(time.time()-t1))
 
 
-if False:
-    print("begin optimize")
-    t_o = time.time()
-    res = optimize.minimize(solveKeplarians, initialParams, args=(radialVz,))
-    print("took %.2f"%(time.time()-t_o))
-    import pdb; pdb.set_trace()
-    xFit = numpy.abs(res.x)
-else:
-    xFit = numpy.abs([1.67424193e+05,  6.04444626e+00,  3.32528328e+00,  5.49404667e+00,
-        4.66407932e+00,  2.59961184e+06,  3.15160590e+01,  1.79881532e+00,
-        8.18404328e+02,  6.29768038e+01,  5.28047424e+06,  4.53785648e+01,
-        3.52656960e+01,  6.25433713e+02,  1.46915406e+02,  1.07360640e+07,
-        1.79263727e+01,  9.86261767e+00, -1.86212848e+01,  2.32308045e+00])
-print("chi2 initial: %.2f"%(solveKeplarians(initialParams, radialVz)))
-print("chi2 fit: %.2f"%(solveKeplarians(xFit, radialVz)))
+### look at residuals
+plt.figure(figsize=(10, 10))
+plt.plot(times / planetD.P, radialVz - bestRV, label="WH-Fast - simul")
+p = plt.axhspan(-10, 10, facecolor='red', alpha=0.2, label="+/- 10 m/s")
+p = plt.axhspan(-5, 5, facecolor='green', alpha=0.2, label="+/- 5 m/s")
+plt.legend()
+plt.ylabel("radial velocity residulas (m/s)")
+plt.xlabel("innermost planet orbits")
+plt.savefig("bestsimulresiduals.png", dpi=150)
+plt.close()
+
+def kepMinimizer(params, nPlanets, measV):
+    chi2, rv = fitKeplers(params, nPlanets, measV)
+    return chi2
 
 
+### use a minimizer!
+initialGuess = gridParams[res[minInd][1]]
+# initialGuess = [2.55910000e-01, 2.59961184e+06, 2.12989332e-01, 6.48000000e-02, 5.28047424e+06, 1.38443066e+00]
+paramLowerBounds = [0, planetC.P/200., 0.1, 0, planetB.P/200., 0.1]
+paramUpperBounds = [1, planetC.P*200, numpy.radians(359.9), 1, planetB.P*200, numpy.radians(359.9)]
 
+bounds = optimize.Bounds(paramLowerBounds, paramUpperBounds)
+res = optimize.minimize(kepMinimizer, initialParams, args=(nPlanets, radialVz), method='trust-constr', options={'verbose': 1}, bounds=bounds)
+bestVals = res.x
+
+chi, bestRV = fitKeplers(bestVals, nPlanets, radialVz)
+print("minimizer chi2: %.5f"%chi)
+print("minimizer found: ")
+print("planet c | e=%.2f P=%.4f (days) MA=%.4f (degrees)"%(bestVals[0], bestVals[1]/secondsPerDay, numpy.degrees(bestVals[2])))
+print("planet b | e=%.2f P=%.4f (days) MA=%.4f (degrees)"%(bestVals[0+3], bestVals[1+3]/secondsPerDay, numpy.degrees(bestVals[2+3])))
+
+plt.figure(figsize=(10, 10))
+plt.plot(times / planetD.P, radialVz - bestRV, label="WH-Fast - minimize")
+p = plt.axhspan(-10, 10, facecolor='red', alpha=0.2, label="+/- 10 m/s")
+p = plt.axhspan(-5, 5, facecolor='green', alpha=0.2, label="+/- 5 m/s")
+plt.legend()
+plt.ylabel("radial velocity residulas (m/s)")
+plt.xlabel("innermost planet orbits")
+plt.savefig("bestminimizedresiduals.png", dpi=150)
+plt.close()
 
 ################## TTV ########################
 secondsPerYear = 3.154e7
